@@ -66,6 +66,8 @@ interface LocalDeckState {
   removeDeck: (deckId: string) => void
   /** Sync progress to Supabase (background, non-blocking) */
   syncProgressToServer: (deckId: string, userId: string) => void
+  /** Hydrate local progress from Supabase (for cross-device sync on login) */
+  hydrateFromServer: (userId: string) => Promise<void>
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +272,46 @@ export const useLocalDeckStore = create<LocalDeckState>()(
           delete updates[deckId]
           return { decks, progress, updatesAvailable: updates }
         })
+      },
+
+      hydrateFromServer: async (userId: string) => {
+        const localDecks = get().decks
+        const deckIds = Object.keys(localDecks)
+        if (deckIds.length === 0) return
+
+        try {
+          // Fetch all remote progress for user's downloaded decks
+          const { data: remoteProgress } = await supabase
+            .from('card_progress')
+            .select('*')
+            .eq('user_id', userId)
+            .in('deck_id', deckIds)
+
+          if (!remoteProgress || remoteProgress.length === 0) return
+
+          const localProgress = { ...get().progress }
+
+          for (const remote of remoteProgress as CardProgress[]) {
+            const deckProg = localProgress[remote.deck_id] ?? {}
+            const local = deckProg[remote.card_id]
+
+            // Merge: latest last_reviewed_at wins
+            const remoteTime = remote.last_reviewed_at ? new Date(remote.last_reviewed_at).getTime() : 0
+            const localTime = local?.last_reviewed_at ? new Date(local.last_reviewed_at).getTime() : 0
+
+            if (!local || remoteTime > localTime) {
+              // Remote is newer — update local
+              deckProg[remote.card_id] = remote
+            }
+            // If local is newer, keep local (it'll sync up on next study session)
+
+            localProgress[remote.deck_id] = deckProg
+          }
+
+          set({ progress: localProgress })
+        } catch {
+          // Offline — skip hydration
+        }
       },
 
       syncProgressToServer: (deckId: string, userId: string) => {

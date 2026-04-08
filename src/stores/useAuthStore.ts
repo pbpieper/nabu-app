@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { supabase } from '@src/services/supabase/client'
+import { useLocalDeckStore } from './useLocalDeckStore'
 import type { Session } from '@supabase/supabase-js'
 import type { Profile } from '@src/types'
 
@@ -27,12 +28,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     if (session) {
       const { data } = await supabase.from('profiles').select('*').eq('id', session.user.id).maybeSingle()
       if (data) set({ profile: data })
+      // Hydrate local progress from server (cross-device sync)
+      useLocalDeckStore.getState().hydrateFromServer(session.user.id).catch(() => {})
     }
     supabase.auth.onAuthStateChange(async (_event, session) => {
       set({ session })
       if (session) {
         const { data } = await supabase.from('profiles').select('*').eq('id', session.user.id).maybeSingle()
         if (data) set({ profile: data })
+        // Hydrate on login / token refresh
+        useLocalDeckStore.getState().hydrateFromServer(session.user.id).catch(() => {})
       } else {
         set({ profile: null })
       }
