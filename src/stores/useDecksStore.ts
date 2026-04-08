@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { supabase } from '@src/services/supabase/client'
+import { generateShareCode } from '@src/lib/utils'
 import type { Deck, Card } from '@src/types'
 
 export interface DeckStats {
@@ -7,6 +8,17 @@ export interface DeckStats {
   learning: number
   review: number
   mastered: number
+}
+
+/** Shape for bulk-inserting new cards (id/deck_id/created_at auto-generated). */
+export interface NewCard {
+  word: string
+  translation: string
+  sort_order: number
+  example_sentence?: string
+  explanation?: string
+  part_of_speech?: string
+  notes?: string
 }
 
 interface DecksState {
@@ -22,6 +34,15 @@ interface DecksState {
   loadDeckWithCards: (deckId: string, userId: string) => Promise<void>
   setCurrentDeck: (deck: Deck) => void
   getDeckById: (id: string) => Deck | undefined
+  createDeck: (
+    title: string,
+    description: string,
+    sourceLang: string,
+    targetLang: string,
+    creatorId: string,
+  ) => Promise<Deck>
+  addCards: (deckId: string, cards: NewCard[]) => Promise<Card[]>
+  deleteCard: (cardId: string, deckId: string) => Promise<void>
 }
 
 export const useDecksStore = create<DecksState>((set, get) => ({
@@ -107,4 +128,105 @@ export const useDecksStore = create<DecksState>((set, get) => ({
   })),
 
   getDeckById: (id: string) => get().decks.find(d => d.id === id),
+
+  createDeck: async (title, description, sourceLang, targetLang, creatorId) => {
+    // Try up to 3 times in case of share_code collision
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const shareCode = generateShareCode()
+      const { data, error } = await supabase
+        .from('decks')
+        .insert({
+          title,
+          description: description || null,
+          source_language: sourceLang,
+          target_language: targetLang,
+          share_code: shareCode,
+          creator_id: creatorId,
+          is_public: false,
+          card_count: 0,
+        })
+        .select()
+        .single()
+
+      if (error) {
+        // unique_violation on share_code → retry
+        if (error.code === '23505' && attempt < 2) continue
+        throw new Error(error.message)
+      }
+      if (!data) throw new Error('No data returned from deck insert')
+
+      // Add to local state
+      set(s => ({ decks: [data, ...s.decks], currentDeck: data, currentCards: [] }))
+      return data as Deck
+    }
+    throw new Error('Failed to generate unique share code')
+  },
+
+  addCards: async (deckId, cards) => {
+    if (cards.length === 0) return []
+
+    const rows = cards.map(c => ({
+      deck_id: deckId,
+      word: c.word,
+      translation: c.translation,
+      sort_order: c.sort_order,
+      example_sentence: c.example_sentence ?? null,
+      explanation: c.explanation ?? null,
+      part_of_speech: c.part_of_speech ?? null,
+      notes: c.notes ?? null,
+    }))
+
+    const { data, error } = await supabase
+      .from('cards')
+      .insert(rows)
+      .select()
+
+    if (error) throw new Error(error.message)
+    const inserted = (data ?? []) as Card[]
+
+    // Update card_count on the deck
+    await supabase
+      .from('decks')
+      .update({ card_count: (get().currentCards.length) + inserted.length })
+      .eq('id', deckId)
+
+    set(s => ({
+      currentCards: [...s.currentCards, ...inserted],
+      currentDeck: s.currentDeck?.id === deckId
+        ? { ...s.currentDeck, card_count: s.currentCards.length + inserted.length }
+        : s.currentDeck,
+      decks: s.decks.map(d =>
+        d.id === deckId ? { ...d, card_count: s.currentCards.length + inserted.length } : d,
+      ),
+    }))
+
+    return inserted
+  },
+
+  deleteCard: async (cardId, deckId) => {
+    const { error } = await supabase
+      .from('cards')
+      .delete()
+      .eq('id', cardId)
+
+    if (error) throw new Error(error.message)
+
+    const newCards = get().currentCards.filter(c => c.id !== cardId)
+    const newCount = newCards.length
+
+    await supabase
+      .from('decks')
+      .update({ card_count: newCount })
+      .eq('id', deckId)
+
+    set(s => ({
+      currentCards: newCards,
+      currentDeck: s.currentDeck?.id === deckId
+        ? { ...s.currentDeck, card_count: newCount }
+        : s.currentDeck,
+      decks: s.decks.map(d =>
+        d.id === deckId ? { ...d, card_count: newCount } : d,
+      ),
+    }))
+  },
 }))

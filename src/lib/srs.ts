@@ -40,7 +40,7 @@ export function processReview(progress: CardProgress, correct: boolean): CardPro
     updated.consecutive_correct = 0
     updated.status = 'learning'
     updated.interval_days = 0
-    updated.next_review_at = addMinutes(now, 5).toISOString()
+    updated.next_review_at = now.toISOString()
   }
 
   return updated

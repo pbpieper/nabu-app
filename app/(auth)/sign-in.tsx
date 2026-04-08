@@ -3,17 +3,21 @@ import {
   View, Text, TextInput, Pressable, KeyboardAvoidingView,
   Platform, ActivityIndicator, type TextInput as TI,
 } from 'react-native'
-import { Link } from 'expo-router'
+import { Link, useRouter } from 'expo-router'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import Toast from 'react-native-toast-message'
 import { useAuthStore } from '@src/stores/useAuthStore'
 import { useThemeStore } from '@src/stores/useThemeStore'
 
 export default function SignInScreen() {
+  const router = useRouter()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [emailFocused, setEmailFocused] = useState(false)
   const [passFocused, setPassFocused] = useState(false)
+  const [showGuestInput, setShowGuestInput] = useState(false)
+  const [deckCode, setDeckCode] = useState('')
+  const [deckCodeFocused, setDeckCodeFocused] = useState(false)
   const passRef = useRef<TI>(null)
   const signIn = useAuthStore(s => s.signIn)
   const loading = useAuthStore(s => s.loading)
@@ -168,6 +172,70 @@ export default function SignInScreen() {
                 </Text>
               </Pressable>
             </Link>
+          </View>
+
+          {/* Guest access */}
+          <View style={{
+            marginTop: 32, borderTopWidth: 1, borderTopColor: c.border,
+            paddingTop: 24, alignItems: 'center',
+          }}>
+            {!showGuestInput ? (
+              <Pressable onPress={() => setShowGuestInput(true)}>
+                <Text style={{
+                  fontFamily: 'Geist-Regular', fontSize: 14, color: c.link,
+                }}>
+                  Have a deck code? Study as guest →
+                </Text>
+              </Pressable>
+            ) : (
+              <View style={{ width: '100%' }}>
+                <Text style={{
+                  fontFamily: 'Geist-Medium', fontSize: 13, color: c.text,
+                  marginBottom: 6,
+                }}>
+                  Deck Code
+                </Text>
+                <View style={{ flexDirection: 'row', gap: 10 }}>
+                  <TextInput
+                    value={deckCode}
+                    onChangeText={(t) => setDeckCode(t.toUpperCase())}
+                    placeholder="e.g. ABC123"
+                    placeholderTextColor={c.placeholder}
+                    autoCapitalize="characters"
+                    autoCorrect={false}
+                    returnKeyType="go"
+                    onFocus={() => setDeckCodeFocused(true)}
+                    onBlur={() => setDeckCodeFocused(false)}
+                    onSubmitEditing={() => {
+                      if (deckCode.trim()) router.push(`/guest/${deckCode.trim()}`)
+                    }}
+                    style={{
+                      flex: 1, fontFamily: 'Geist-Regular', fontSize: 15, color: c.text,
+                      borderWidth: 1, borderColor: deckCodeFocused ? c.borderFocus : c.border,
+                      borderRadius: 8, paddingHorizontal: 14, height: 44,
+                      backgroundColor: 'transparent',
+                      ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
+                    }}
+                  />
+                  <Pressable
+                    onPress={() => {
+                      if (deckCode.trim()) router.push(`/guest/${deckCode.trim()}`)
+                    }}
+                    disabled={!deckCode.trim()}
+                    style={({ pressed }) => ({
+                      backgroundColor: c.btnBg,
+                      borderRadius: 8, height: 44, paddingHorizontal: 20,
+                      alignItems: 'center', justifyContent: 'center',
+                      opacity: !deckCode.trim() ? 0.4 : pressed ? 0.85 : 1,
+                    })}
+                  >
+                    <Text style={{ fontFamily: 'Geist-Medium', fontSize: 15, color: c.btnText }}>
+                      Go
+                    </Text>
+                  </Pressable>
+                </View>
+              </View>
+            )}
           </View>
 
         </View>

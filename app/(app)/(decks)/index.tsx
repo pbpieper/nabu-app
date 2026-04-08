@@ -5,7 +5,7 @@ import { useRouter } from 'expo-router'
 import Toast from 'react-native-toast-message'
 import { useDecksStore } from '@src/stores/useDecksStore'
 import { useThemeColors } from '@src/hooks/useThemeColors'
-import { ArrowRight, BookOpen, ChevronRight, Layers } from 'lucide-react-native'
+import { ArrowRight, BookOpen, ChevronRight, Layers, Plus } from 'lucide-react-native'
 
 export default function DecksScreen() {
   const router = useRouter()
@@ -90,10 +90,26 @@ export default function DecksScreen() {
         </View>
         <Text style={{
           fontFamily: 'Geist-Regular', fontSize: 12, color: c.textMuted,
-          marginBottom: 32,
+          marginBottom: 20,
         }}>
           Get a code from your teacher to join their deck
         </Text>
+
+        {/* Create Deck */}
+        <Pressable
+          onPress={() => router.push('/(app)/(decks)/create')}
+          style={({ pressed }) => ({
+            flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+            borderWidth: 1, borderColor: c.border, borderRadius: 10,
+            paddingVertical: 12, marginBottom: 32,
+            opacity: pressed ? 0.7 : 1,
+          })}
+        >
+          <Plus size={16} color={c.textSecondary} />
+          <Text style={{ fontFamily: 'Geist-Medium', fontSize: 14, color: c.textSecondary }}>
+            Create a Deck
+          </Text>
+        </Pressable>
 
         {/* Collection */}
         <Text style={{

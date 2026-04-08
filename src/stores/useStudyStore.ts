@@ -101,15 +101,23 @@ export const useStudyStore = create<StudyState>((set, get) => ({
     const newMap = new Map(progressMap)
     newMap.set(cardId, updated)
 
-    set(state => ({
-      progressMap: newMap,
-      sessionStats: {
-        ...state.sessionStats,
-        cardsReviewed: state.sessionStats.cardsReviewed + 1,
-        cardsCorrect: state.sessionStats.cardsCorrect + (correct ? 1 : 0),
-        newCardsSeen: state.sessionStats.newCardsSeen + (!existing ? 1 : 0),
-      },
-    }))
+    set(state => {
+      // Re-add wrong answers to the end of the queue so they come back this session
+      const updatedQueue = !correct
+        ? [...state.queue, cardId]
+        : state.queue
+
+      return {
+        queue: updatedQueue,
+        progressMap: newMap,
+        sessionStats: {
+          ...state.sessionStats,
+          cardsReviewed: state.sessionStats.cardsReviewed + 1,
+          cardsCorrect: state.sessionStats.cardsCorrect + (correct ? 1 : 0),
+          newCardsSeen: state.sessionStats.newCardsSeen + (!existing ? 1 : 0),
+        },
+      }
+    })
 
     supabase.from('card_progress').upsert({
       user_id: updated.user_id,

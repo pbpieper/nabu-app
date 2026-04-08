@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { View, Text, Pressable, ActivityIndicator } from 'react-native'
+import {
+  View, Text, Pressable, ActivityIndicator, Animated, Platform, Image,
+} from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { useRouter, useNavigation, useFocusEffect } from 'expo-router'
 import { useDecksStore } from '@src/stores/useDecksStore'
@@ -8,8 +10,43 @@ import { useAuthStore } from '@src/stores/useAuthStore'
 import { useStudyPreferencesStore } from '@src/stores/useStudyPreferencesStore'
 import { useThemeColors } from '@src/hooks/useThemeColors'
 import { useThemeStore } from '@src/stores/useThemeStore'
-import { isRTL, type SessionStats } from '@src/types'
-import { X, CheckCircle, RotateCcw, Check, Clock, RefreshCw } from 'lucide-react-native'
+import { useAudio } from '@src/hooks/useAudio'
+import { isRTL, type Card, type SessionStats } from '@src/types'
+import {
+  X, CheckCircle, RotateCcw, Check, Clock, RefreshCw, Volume2,
+} from 'lucide-react-native'
+
+// ---------------------------------------------------------------------------
+// Types for progressive reveal
+// ---------------------------------------------------------------------------
+
+type LayerType = 'example_sentence' | 'explanation' | 'image' | 'translation'
+
+interface RevealLayerEntry {
+  type: LayerType
+  /** Fade-in animation value */
+  opacity: Animated.Value
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Build the ordered list of layers that have content for a given card. */
+function buildLayers(card: Card): RevealLayerEntry[] {
+  const layers: RevealLayerEntry[] = []
+  // Order: example_sentence -> explanation -> image -> translation (always last)
+  if (card.example_sentence) layers.push({ type: 'example_sentence', opacity: new Animated.Value(0) })
+  if (card.explanation) layers.push({ type: 'explanation', opacity: new Animated.Value(0) })
+  if (card.image_url) layers.push({ type: 'image', opacity: new Animated.Value(0) })
+  // Translation is always last and always present
+  layers.push({ type: 'translation', opacity: new Animated.Value(0) })
+  return layers
+}
+
+// ---------------------------------------------------------------------------
+// Main component
+// ---------------------------------------------------------------------------
 
 export default function StudySession() {
   const router = useRouter()
@@ -25,13 +62,105 @@ export default function StudySession() {
     queue, currentIndex, sessionActive,
     loadAndStart, startSession, answerCard, nextCard, endSession, sessionStats,
   } = useStudyStore()
-  const [flipped, setFlipped] = useState(false)
-  const completedStatsRef = useRef<SessionStats | null>(null)
+
   const c = useThemeColors()
+  const { play: playAudio, stop: stopAudio } = useAudio()
+
+  // Progressive reveal state
+  const [revealedCount, setRevealedCount] = useState(0)
+  const [layers, setLayers] = useState<RevealLayerEntry[]>([])
+  const [keyHintDismissed, setKeyHintDismissed] = useState(false)
+
+  const completedStatsRef = useRef<SessionStats | null>(null)
 
   const userId = profile?.id ?? session?.user?.id
 
-  // Hide the tab bar while this screen is focused
+  // Derived state
+  const currentCardId = queue[currentIndex]
+  const card = currentCards.find(ci => ci.id === currentCardId)
+  const translationRevealed = revealedCount >= layers.length && layers.length > 0
+  const rtl = currentDeck ? isRTL(currentDeck.target_language) : false
+
+  // Rebuild layers whenever card changes
+  useEffect(() => {
+    if (card) {
+      const newLayers = buildLayers(card)
+      setLayers(newLayers)
+      setRevealedCount(0)
+    }
+  }, [card?.id])
+
+  // ---------------------------------------------------------------------------
+  // Reveal logic
+  // ---------------------------------------------------------------------------
+
+  const revealNext = useCallback(() => {
+    if (revealedCount >= layers.length) return
+    const layer = layers[revealedCount]
+    Animated.timing(layer.opacity, {
+      toValue: 1,
+      duration: 250,
+      useNativeDriver: true,
+    }).start()
+
+    const newCount = revealedCount + 1
+    setRevealedCount(newCount)
+
+    // Auto-play audio when card has audio and this is the first reveal
+    if (newCount === 1 && card?.audio_url) {
+      playAudio(card.audio_url).catch(() => {})
+    }
+  }, [revealedCount, layers, card, playAudio])
+
+  // ---------------------------------------------------------------------------
+  // Answer handlers
+  // ---------------------------------------------------------------------------
+
+  const handleAnswer = useCallback((correct: boolean) => {
+    if (userId && card) answerCard(card.id, correct, userId)
+    stopAudio().catch(() => {})
+    nextCard()
+    // revealedCount and layers reset via the card?.id effect
+  }, [userId, card, answerCard, nextCard, stopAudio])
+
+  // ---------------------------------------------------------------------------
+  // Keyboard shortcuts (web only)
+  // ---------------------------------------------------------------------------
+
+  useEffect(() => {
+    if (Platform.OS !== 'web') return
+    const handler = (e: KeyboardEvent) => {
+      // Ignore if user is typing in an input
+      const tag = (e.target as HTMLElement)?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return
+
+      if (e.key === ' ' || e.code === 'Space') {
+        e.preventDefault()
+        if (translationRevealed) {
+          handleAnswer(true)
+        } else {
+          revealNext()
+        }
+      }
+      if (translationRevealed) {
+        if (e.key === 'ArrowLeft' || e.key === '1') {
+          e.preventDefault()
+          handleAnswer(false)
+        }
+        if (e.key === 'ArrowRight' || e.key === '2') {
+          e.preventDefault()
+          handleAnswer(true)
+        }
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [translationRevealed, revealNext, handleAnswer])
+
+  // ---------------------------------------------------------------------------
+  // Tab bar hiding
+  // ---------------------------------------------------------------------------
+
   useFocusEffect(useCallback(() => {
     const parent = navigation.getParent()
     parent?.setOptions({
@@ -57,7 +186,10 @@ export default function StudySession() {
     }
   }, [navigation, dark]))
 
-  // Single parallel load: cards + progress fetched together, session starts immediately
+  // ---------------------------------------------------------------------------
+  // Session bootstrap
+  // ---------------------------------------------------------------------------
+
   useEffect(() => {
     if (currentDeck && userId && !sessionActive) {
       loadAndStart(currentDeck.id, userId, { newLimit: newCardsPerSession })
@@ -73,9 +205,14 @@ export default function StudySession() {
   }, [isComplete])
 
   const handleClose = () => {
+    stopAudio().catch(() => {})
     endSession()
     router.back()
   }
+
+  // =========================================================================
+  // EARLY RETURN SCREENS (no deck, loading, all caught up, session complete)
+  // =========================================================================
 
   if (!currentDeck) {
     return (
@@ -109,10 +246,6 @@ export default function StudySession() {
       </SafeAreaView>
     )
   }
-
-  const currentCardId = queue[currentIndex]
-  const card = currentCards.find(c => c.id === currentCardId)
-  const rtl = isRTL(currentDeck.target_language)
 
   if (!sessionActive && (currentCards.length === 0 || queue.length === 0)) {
     return (
@@ -298,16 +431,33 @@ export default function StudySession() {
     )
   }
 
-  const handleAnswer = (correct: boolean) => {
-    if (userId) answerCard(card.id, correct, userId)
-    setFlipped(false)
-    nextCard()
-  }
+  // =========================================================================
+  // ACTIVE CARD RENDER
+  // =========================================================================
 
   const progress = ((currentIndex + 1) / queue.length) * 100
 
+  /** Check whether a specific layer type has been revealed. */
+  const isLayerRevealed = (type: LayerType): boolean => {
+    const idx = layers.findIndex(l => l.type === type)
+    return idx !== -1 && idx < revealedCount
+  }
+
+  /** Get the Animated.Value for a layer, if it exists. */
+  const getLayerOpacity = (type: LayerType): Animated.Value | null => {
+    const layer = layers.find(l => l.type === type)
+    return layer?.opacity ?? null
+  }
+
+  const tapHintText = translationRevealed
+    ? undefined
+    : revealedCount === 0
+      ? 'Tap to reveal'
+      : `Tap for more (${layers.length - revealedCount} left)`
+
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }}>
+      {/* Header */}
       <View style={{
         flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
         paddingHorizontal: 20, paddingVertical: 12,
@@ -321,65 +471,122 @@ export default function StudySession() {
         <View style={{ width: 36 }} />
       </View>
 
+      {/* Progress bar */}
       <View style={{ height: 3, backgroundColor: c.progressBg, marginHorizontal: 20, borderRadius: 2 }}>
         <View style={{ height: 3, backgroundColor: c.progressFill, borderRadius: 2, width: `${progress}%` }} />
       </View>
 
+      {/* Card area */}
       <View style={{ flex: 1, justifyContent: 'center', paddingHorizontal: 24 }}>
         <Pressable
-          onPress={() => setFlipped(!flipped)}
+          onPress={translationRevealed ? undefined : revealNext}
           style={{
             borderWidth: 1, borderColor: c.border,
             borderRadius: 16, padding: 32, minHeight: 260,
             alignItems: 'center', justifyContent: 'center',
           }}
         >
-          {!flipped ? (
-            <>
+          {/* Word (always shown) */}
+          <Text style={{
+            fontFamily: 'Geist-SemiBold', fontSize: 28, color: c.text,
+            textAlign: 'center', writingDirection: rtl ? 'rtl' : 'ltr',
+          }}>
+            {card.word}
+          </Text>
+          {card.part_of_speech && (
+            <Text style={{
+              fontFamily: 'Geist-Regular', fontSize: 13, color: c.textMuted, marginTop: 8,
+            }}>
+              {card.part_of_speech}
+            </Text>
+          )}
+
+          {/* Audio replay button — appears after first reveal if card has audio */}
+          {card.audio_url && revealedCount > 0 && (
+            <Pressable
+              onPress={() => card.audio_url && playAudio(card.audio_url).catch(() => {})}
+              style={({ pressed }) => ({
+                marginTop: 12, padding: 8, borderRadius: 20,
+                backgroundColor: c.surface,
+                opacity: pressed ? 0.6 : 1,
+              })}
+            >
+              <Volume2 size={18} color={c.textSecondary} />
+            </Pressable>
+          )}
+
+          {/* Example sentence layer */}
+          {isLayerRevealed('example_sentence') && getLayerOpacity('example_sentence') && (
+            <Animated.View style={{
+              opacity: getLayerOpacity('example_sentence')!,
+              backgroundColor: c.surface, borderRadius: 8, padding: 12, marginTop: 16, width: '100%',
+            }}>
               <Text style={{
-                fontFamily: 'Geist-SemiBold', fontSize: 28, color: c.text,
-                textAlign: 'center', writingDirection: rtl ? 'rtl' : 'ltr',
+                fontFamily: 'Geist-Regular', fontSize: 14, color: c.textSecondary,
+                textAlign: 'center', lineHeight: 20, writingDirection: rtl ? 'rtl' : 'ltr',
               }}>
-                {card.word}
+                {card.example_sentence}
               </Text>
-              {card.part_of_speech && (
-                <Text style={{ fontFamily: 'Geist-Regular', fontSize: 13, color: c.textMuted, marginTop: 8 }}>
-                  {card.part_of_speech}
+            </Animated.View>
+          )}
+
+          {/* Explanation layer */}
+          {isLayerRevealed('explanation') && getLayerOpacity('explanation') && (
+            <Animated.View style={{ opacity: getLayerOpacity('explanation')!, marginTop: 10 }}>
+              <Text style={{
+                fontFamily: 'Geist-Regular', fontSize: 13, color: c.textMuted, textAlign: 'center',
+              }}>
+                {card.explanation}
+              </Text>
+            </Animated.View>
+          )}
+
+          {/* Image layer */}
+          {isLayerRevealed('image') && getLayerOpacity('image') && card.image_url && (
+            <Animated.View style={{
+              opacity: getLayerOpacity('image')!, marginTop: 16, width: '100%',
+              alignItems: 'center',
+            }}>
+              <Image
+                source={{ uri: card.image_url }}
+                style={{ width: '100%', maxWidth: 300, height: 200, borderRadius: 10 }}
+                resizeMode="contain"
+              />
+            </Animated.View>
+          )}
+
+          {/* Translation layer (always last) */}
+          {isLayerRevealed('translation') && getLayerOpacity('translation') && (
+            <Animated.View style={{ opacity: getLayerOpacity('translation')!, marginTop: 20 }}>
+              <View style={{
+                borderTopWidth: 1, borderTopColor: c.border, paddingTop: 16, alignItems: 'center',
+              }}>
+                <Text style={{ fontFamily: 'Geist-Regular', fontSize: 12, color: c.textMuted, marginBottom: 4 }}>
+                  Translation
                 </Text>
-              )}
-              <Text style={{ fontFamily: 'Geist-Regular', fontSize: 12, color: c.textMuted, marginTop: 20, opacity: 0.6 }}>
-                Tap to reveal
-              </Text>
-            </>
-          ) : (
-            <>
-              <Text style={{ fontFamily: 'Geist-Regular', fontSize: 13, color: c.textMuted, marginBottom: 8 }}>
-                {card.word}
-              </Text>
-              <Text style={{ fontFamily: 'Geist-SemiBold', fontSize: 24, color: c.text, textAlign: 'center' }}>
-                {card.translation}
-              </Text>
-              {card.example_sentence && (
-                <View style={{ backgroundColor: c.surface, borderRadius: 8, padding: 12, marginTop: 16, width: '100%' }}>
-                  <Text style={{
-                    fontFamily: 'Geist-Regular', fontSize: 14, color: c.textSecondary,
-                    textAlign: 'center', lineHeight: 20, writingDirection: rtl ? 'rtl' : 'ltr',
-                  }}>
-                    {card.example_sentence}
-                  </Text>
-                </View>
-              )}
-              {card.explanation && (
-                <Text style={{ fontFamily: 'Geist-Regular', fontSize: 13, color: c.textMuted, marginTop: 10, textAlign: 'center' }}>
-                  {card.explanation}
+                <Text style={{
+                  fontFamily: 'Geist-SemiBold', fontSize: 24, color: c.text, textAlign: 'center',
+                }}>
+                  {card.translation}
                 </Text>
-              )}
-            </>
+              </View>
+            </Animated.View>
+          )}
+
+          {/* Tap hint */}
+          {tapHintText && (
+            <Text style={{
+              fontFamily: 'Geist-Regular', fontSize: 12, color: c.textMuted,
+              marginTop: 20, opacity: 0.6,
+            }}>
+              {tapHintText}
+            </Text>
           )}
         </Pressable>
       </View>
 
-      {flipped && (
+      {/* Grading buttons — only after translation is revealed */}
+      {translationRevealed && (
         <View style={{ flexDirection: 'row', gap: 12, paddingHorizontal: 24, paddingBottom: 24 }}>
           <Pressable
             onPress={() => handleAnswer(false)}
@@ -402,6 +609,27 @@ export default function StudySession() {
           >
             <Check size={16} color={c.success} />
             <Text style={{ fontFamily: 'Geist-Medium', fontSize: 15, color: c.success }}>Got it</Text>
+          </Pressable>
+        </View>
+      )}
+
+      {/* Keyboard hint bar (web only) */}
+      {Platform.OS === 'web' && !keyHintDismissed && (
+        <View style={{
+          flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+          paddingVertical: 8, paddingHorizontal: 16,
+          backgroundColor: c.surface, borderTopWidth: 1, borderTopColor: c.border,
+        }}>
+          <Text style={{
+            fontFamily: 'Geist-Regular', fontSize: 12, color: c.textMuted, flex: 1, textAlign: 'center',
+          }}>
+            Space reveal{' \u00B7 '}{'\u2190'} again{' \u00B7 '}{'\u2192'} got it
+          </Text>
+          <Pressable
+            onPress={() => setKeyHintDismissed(true)}
+            style={{ padding: 4 }}
+          >
+            <X size={14} color={c.textMuted} />
           </Pressable>
         </View>
       )}

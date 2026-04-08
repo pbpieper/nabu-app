@@ -8,7 +8,7 @@ import { useDecksStore } from '@src/stores/useDecksStore'
 import { useAuthStore } from '@src/stores/useAuthStore'
 import { useThemeColors } from '@src/hooks/useThemeColors'
 import { LANGUAGES, isRTL } from '@src/types'
-import { ArrowLeft, Play, Copy, Globe } from 'lucide-react-native'
+import { ArrowLeft, Play, Copy, Globe, Pencil } from 'lucide-react-native'
 
 function langName(code: string): string {
   return LANGUAGES.find(l => l.code === code)?.name ?? code.toUpperCase()
@@ -170,6 +170,24 @@ export default function DeckDetailScreen({ deckId }: { deckId: string }) {
                 Study Now
               </Text>
             </Pressable>
+
+            {/* Edit Cards — visible to deck creator */}
+            {userId && deck.creator_id === userId && (
+              <Pressable
+                onPress={() => router.push(`/(app)/(decks)/editor?deckId=${deck.id}` as any)}
+                style={({ pressed }) => ({
+                  flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+                  borderWidth: 1, borderColor: c.border, borderRadius: 12,
+                  paddingVertical: 14, marginTop: 10,
+                  opacity: pressed ? 0.7 : 1,
+                })}
+              >
+                <Pencil size={16} color={c.textSecondary} />
+                <Text style={{ fontFamily: 'Geist-Medium', fontSize: 15, color: c.textSecondary }}>
+                  Edit Cards
+                </Text>
+              </Pressable>
+            )}
 
             {/* Card list */}
             {cards.length > 0 && (
