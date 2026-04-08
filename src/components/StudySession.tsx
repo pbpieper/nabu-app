@@ -71,6 +71,7 @@ export default function StudySession() {
   const [revealedCount, setRevealedCount] = useState(0)
   const [layers, setLayers] = useState<RevealLayerEntry[]>([])
   const [keyHintDismissed, setKeyHintDismissed] = useState(false)
+  const cardStartTimeRef = useRef<number>(Date.now())
 
   const completedStatsRef = useRef<SessionStats | null>(null)
 
@@ -88,6 +89,7 @@ export default function StudySession() {
       const newLayers = buildLayers(card)
       setLayers(newLayers)
       setRevealedCount(0)
+      cardStartTimeRef.current = Date.now()
     }
   }, [card?.id])
 
@@ -138,11 +140,12 @@ export default function StudySession() {
   // ---------------------------------------------------------------------------
 
   const handleAnswer = useCallback((correct: boolean) => {
-    if (userId && card) answerCard(card.id, correct, userId)
+    const timeMs = Date.now() - cardStartTimeRef.current
+    if (userId && card) answerCard(card.id, correct, userId, revealedCount, timeMs)
     stopAudio().catch(() => {})
     nextCard()
     // revealedCount and layers reset via the card?.id effect
-  }, [userId, card, answerCard, nextCard, stopAudio])
+  }, [userId, card, answerCard, nextCard, stopAudio, revealedCount])
 
   // ---------------------------------------------------------------------------
   // Keyboard shortcuts (web only)
@@ -609,6 +612,14 @@ export default function StudySession() {
                 }}>
                   {card.translation}
                 </Text>
+                {card.grammar_tag && (
+                  <Text style={{
+                    fontFamily: 'Geist-Regular', fontSize: 12, color: c.textMuted,
+                    fontStyle: 'italic', marginTop: 4,
+                  }}>
+                    {card.grammar_tag}
+                  </Text>
+                )}
               </View>
             </Animated.View>
           )}

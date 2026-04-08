@@ -9,6 +9,8 @@ interface StartOpts { includeAll?: boolean; newLimit?: number }
 interface AnswerHistoryEntry {
   cardId: string
   correct: boolean
+  hintsRevealed: number
+  timeMs: number
   prevProgress: CardProgress | null
 }
 
@@ -24,7 +26,7 @@ interface StudyState {
   newRemaining: number
   loadAndStart: (deckId: string, userId: string, opts?: StartOpts) => Promise<void>
   startSession: (cards: Card[], userId: string, deckId: string, opts?: StartOpts) => Promise<void>
-  answerCard: (cardId: string, correct: boolean, userId: string) => void
+  answerCard: (cardId: string, correct: boolean, userId: string, hintsRevealed?: number, timeMs?: number) => void
   undoLastAnswer: (userId: string) => void
   nextCard: () => void
   endSession: () => void
@@ -115,18 +117,30 @@ export const useStudyStore = create<StudyState>((set, get) => ({
     })
   },
 
-  answerCard: (cardId, correct, userId) => {
+  answerCard: (cardId, correct, userId, hintsRevealed = 0, timeMs = 0) => {
     const { progressMap, answerHistory } = get()
     const existing = progressMap.get(cardId) ?? null
     const deckId = useDecksStore.getState().currentDeck?.id ?? ''
     const progress = existing ?? createNewProgress(userId, cardId, deckId)
     const updated = processReview(progress, correct)
 
+    // Update hint tracking
+    updated.last_hints_used = hintsRevealed
+    if (updated.total_reviews === 1) {
+      updated.avg_hints_needed = hintsRevealed
+    } else {
+      updated.avg_hints_needed =
+        Math.round(
+          ((updated.avg_hints_needed * (updated.total_reviews - 1) + hintsRevealed) /
+            updated.total_reviews) * 100
+        ) / 100
+    }
+
     const newMap = new Map(progressMap)
     newMap.set(cardId, updated)
 
     // Save to undo history
-    const newHistory = [...answerHistory, { cardId, correct, prevProgress: existing }]
+    const newHistory = [...answerHistory, { cardId, correct, hintsRevealed, timeMs, prevProgress: existing }]
 
     set(state => {
       const updatedQueue = !correct
@@ -159,7 +173,19 @@ export const useStudyStore = create<StudyState>((set, get) => ({
       total_correct: updated.total_correct,
       status: updated.status,
       last_reviewed_at: updated.last_reviewed_at,
+      avg_hints_needed: updated.avg_hints_needed,
+      last_hints_used: updated.last_hints_used,
     }, { onConflict: 'user_id,card_id' }).then(() => {}, () => {})
+
+    // Log review event
+    supabase.from('review_events').insert({
+      user_id: userId,
+      card_id: cardId,
+      deck_id: deckId,
+      hints_revealed: hintsRevealed,
+      grade: correct ? 'got_it' : 'again',
+      time_to_grade_ms: timeMs,
+    }).then(() => {}, () => {})
   },
 
   undoLastAnswer: (userId: string) => {

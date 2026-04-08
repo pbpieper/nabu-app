@@ -59,6 +59,8 @@ export function createNewProgress(userId: string, cardId: string, deckId: string
     total_correct: 0,
     status: 'new',
     last_reviewed_at: null,
+    avg_hints_needed: 0,
+    last_hints_used: 0,
     created_at: new Date().toISOString(),
   }
 }

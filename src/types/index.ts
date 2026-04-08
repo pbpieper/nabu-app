@@ -32,6 +32,7 @@ export interface Card {
   example_sentence: string | null
   explanation: string | null
   part_of_speech: string | null
+  grammar_tag: string | null
   tags: string[] | null
   notes: string | null
   created_at: string
@@ -49,6 +50,19 @@ export interface CardProgress {
   total_correct: number
   status: 'new' | 'learning' | 'review' | 'mastered'
   last_reviewed_at: string | null
+  avg_hints_needed: number
+  last_hints_used: number
+  created_at: string
+}
+
+export interface ReviewEvent {
+  id: string
+  user_id: string
+  card_id: string
+  deck_id: string
+  hints_revealed: number
+  grade: 'again' | 'got_it'
+  time_to_grade_ms: number
   created_at: string
 }
 
