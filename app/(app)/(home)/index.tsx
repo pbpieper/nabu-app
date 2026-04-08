@@ -6,9 +6,10 @@ import Toast from 'react-native-toast-message'
 import { useAuthStore } from '@src/stores/useAuthStore'
 import { useDecksStore } from '@src/stores/useDecksStore'
 import { useLocalDeckStore } from '@src/stores/useLocalDeckStore'
+import { useStudyPreferencesStore } from '@src/stores/useStudyPreferencesStore'
 import { useThemeColors } from '@src/hooks/useThemeColors'
 import { buildStudyQueue } from '@src/lib/srs'
-import { Flame, Play, ArrowRight, Check, RefreshCw, Trash2 } from 'lucide-react-native'
+import { Flame, Play, ArrowRight, Check, RefreshCw, Trash2, X } from 'lucide-react-native'
 
 const WEEK = ['M', 'T', 'W', 'T', 'F', 'S', 'S']
 
@@ -76,6 +77,7 @@ export default function HomeScreen() {
   const c = useThemeColors()
 
   // Local deck store
+  const newCardsPerSession = useStudyPreferencesStore(s => s.newCardsPerSession)
   const localDecks = useLocalDeckStore(s => s.getAllLocalDecks)()
   const localProgress = useLocalDeckStore(s => s.progress)
   const downloadDeck = useLocalDeckStore(s => s.downloadDeck)
@@ -113,7 +115,7 @@ export default function HomeScreen() {
       card_id: card.id,
       progress: progress[card.id] ?? null,
     }))
-    const queue = buildStudyQueue(entries, 999) // all due + new
+    const queue = buildStudyQueue(entries, newCardsPerSession)
     dueByDeck[deckId] = queue.length
 
     totalDue += queue.length
@@ -392,26 +394,40 @@ export default function HomeScreen() {
                           {ld.cards.length} cards{due > 0 ? ` · ${due} due` : ' · all caught up'}
                         </Text>
                       </View>
-                      {hasUpdate && (
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        {hasUpdate && (
+                          <Pressable
+                            onPress={(e) => {
+                              e.stopPropagation?.()
+                              handleUpdateDeck(ld.deck.id)
+                            }}
+                            disabled={isUpdating}
+                            style={({ pressed }) => ({
+                              paddingHorizontal: 10, paddingVertical: 6,
+                              borderRadius: 8, backgroundColor: c.accent,
+                              opacity: isUpdating ? 0.5 : pressed ? 0.8 : 1,
+                            })}
+                          >
+                            {isUpdating
+                              ? <ActivityIndicator color={c.accentText} size="small" />
+                              : <RefreshCw size={14} color={c.accentText} />
+                            }
+                          </Pressable>
+                        )}
                         <Pressable
                           onPress={(e) => {
                             e.stopPropagation?.()
-                            handleUpdateDeck(ld.deck.id)
+                            removeDeck(ld.deck.id)
+                            Toast.show({ type: 'success', text1: 'Deck removed' })
                           }}
-                          disabled={isUpdating}
                           style={({ pressed }) => ({
-                            paddingHorizontal: 10, paddingVertical: 6,
-                            borderRadius: 8, backgroundColor: c.accent,
-                            opacity: isUpdating ? 0.5 : pressed ? 0.8 : 1,
-                            marginLeft: 8,
+                            padding: 6, borderRadius: 6,
+                            opacity: pressed ? 0.5 : 0.4,
                           })}
                         >
-                          {isUpdating
-                            ? <ActivityIndicator color={c.accentText} size="small" />
-                            : <RefreshCw size={14} color={c.accentText} />
-                          }
+                          <X size={14} color={c.textMuted} />
                         </Pressable>
-                      )}
+                      </View>
                     </Pressable>
                   )
                 })}

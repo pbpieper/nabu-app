@@ -19,6 +19,10 @@ export interface NewCard {
   explanation?: string
   part_of_speech?: string
   notes?: string
+  image_url?: string
+  clue_image_url?: string
+  audio_url?: string
+  grammar_tag?: string
 }
 
 interface DecksState {
@@ -174,6 +178,10 @@ export const useDecksStore = create<DecksState>((set, get) => ({
       explanation: c.explanation ?? null,
       part_of_speech: c.part_of_speech ?? null,
       notes: c.notes ?? null,
+      image_url: c.image_url ?? null,
+      clue_image_url: c.clue_image_url ?? null,
+      audio_url: c.audio_url ?? null,
+      grammar_tag: c.grammar_tag ?? null,
     }))
 
     const { data, error } = await supabase

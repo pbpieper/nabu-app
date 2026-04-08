@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   View,
   Text,
@@ -10,15 +10,19 @@ import {
   Modal,
   Alert,
   KeyboardAvoidingView,
+  Image as RNImage,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { useRouter, useLocalSearchParams } from 'expo-router'
 import * as Clipboard from 'expo-clipboard'
+import * as ImagePicker from 'expo-image-picker'
+import * as DocumentPicker from 'expo-document-picker'
 import Toast from 'react-native-toast-message'
 import { useDecksStore, type NewCard } from '@src/stores/useDecksStore'
 import { useAuthStore } from '@src/stores/useAuthStore'
 import { useThemeColors } from '@src/hooks/useThemeColors'
-import { ArrowLeft, Plus, Trash2, Copy, Upload, X } from 'lucide-react-native'
+import { uploadMedia } from '@src/services/supabase/storage'
+import { ArrowLeft, Plus, Trash2, Copy, Upload, X, ImageIcon, Music } from 'lucide-react-native'
 
 /** Parse bulk text: tab-separated (word\ttranslation) or single column (word per line). */
 function parseBulkText(raw: string): { word: string; translation: string }[] {
@@ -59,7 +63,14 @@ export default function CardEditorScreen() {
   const [translation, setTranslation] = useState('')
   const [sentence, setSentence] = useState('')
   const [explanation, setExplanation] = useState('')
+  const [grammarTag, setGrammarTag] = useState('')
   const [addingCard, setAddingCard] = useState(false)
+
+  // Media uploads
+  const [imageUri, setImageUri] = useState<string | null>(null)
+  const [audioUri, setAudioUri] = useState<string | null>(null)
+  const [audioName, setAudioName] = useState<string | null>(null)
+  const [uploading, setUploading] = useState(false)
 
   // Bulk import
   const [bulkVisible, setBulkVisible] = useState(false)
@@ -72,6 +83,7 @@ export default function CardEditorScreen() {
   const [transFocused, setTransFocused] = useState(false)
   const [sentFocused, setSentFocused] = useState(false)
   const [explFocused, setExplFocused] = useState(false)
+  const [gramFocused, setGramFocused] = useState(false)
   const [bulkFocused, setBulkFocused] = useState(false)
 
   const userId = session?.user?.id
@@ -88,22 +100,78 @@ export default function CardEditorScreen() {
     Toast.show({ type: 'success', text1: 'Code copied', text2: deck.share_code })
   }
 
+  const pickImage = async () => {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      quality: 0.8,
+      allowsEditing: true,
+    })
+    if (!result.canceled && result.assets[0]) {
+      setImageUri(result.assets[0].uri)
+    }
+  }
+
+  const pickAudio = async () => {
+    const result = await DocumentPicker.getDocumentAsync({
+      type: ['audio/*'],
+      copyToCacheDirectory: true,
+    })
+    if (!result.canceled && result.assets[0]) {
+      setAudioUri(result.assets[0].uri)
+      setAudioName(result.assets[0].name)
+    }
+  }
+
   const handleAddCard = async () => {
-    if (!word.trim() || !deckId) return
+    if (!word.trim() || !deckId || !userId) return
     setAddingCard(true)
     try {
+      // Generate a temp card id for storage path
+      const tempCardId = `card-${Date.now()}`
+      let imageUrl: string | undefined
+      let audioUrl: string | undefined
+
+      // Upload media if selected
+      if (imageUri) {
+        setUploading(true)
+        const ext = imageUri.split('.').pop() || 'jpg'
+        const result = await uploadMedia(
+          { uri: imageUri, type: `image/${ext === 'png' ? 'png' : 'jpeg'}`, name: `image.${ext}` },
+          userId, deckId, tempCardId, 'image',
+        )
+        imageUrl = result.url
+      }
+      if (audioUri) {
+        setUploading(true)
+        const ext = audioName?.split('.').pop() || 'mp3'
+        const mimeMap: Record<string, string> = { mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', ogg: 'audio/ogg' }
+        const result = await uploadMedia(
+          { uri: audioUri, type: mimeMap[ext] || 'audio/mpeg', name: audioName || `audio.${ext}` },
+          userId, deckId, tempCardId, 'audio',
+        )
+        audioUrl = result.url
+      }
+      setUploading(false)
+
       const newCard: NewCard = {
         word: word.trim(),
         translation: translation.trim(),
         sort_order: currentCards.length,
         example_sentence: sentence.trim() || undefined,
         explanation: explanation.trim() || undefined,
+        grammar_tag: grammarTag.trim() || undefined,
+        image_url: imageUrl,
+        audio_url: audioUrl,
       }
       await addCards(deckId, [newCard])
       setWord('')
       setTranslation('')
       setSentence('')
       setExplanation('')
+      setGrammarTag('')
+      setImageUri(null)
+      setAudioUri(null)
+      setAudioName(null)
       Toast.show({ type: 'success', text1: 'Card added' })
     } catch (err) {
       Toast.show({
@@ -113,6 +181,7 @@ export default function CardEditorScreen() {
       })
     } finally {
       setAddingCard(false)
+      setUploading(false)
     }
   }
 
@@ -289,6 +358,77 @@ export default function CardEditorScreen() {
               onBlur={() => setExplFocused(false)}
               style={{ ...inputStyle(explFocused), marginTop: 10 }}
             />
+            <TextInput
+              value={grammarTag}
+              onChangeText={setGrammarTag}
+              placeholder="Grammar tag (e.g. noun, verb, adj)"
+              placeholderTextColor={c.placeholder}
+              onFocus={() => setGramFocused(true)}
+              onBlur={() => setGramFocused(false)}
+              style={{ ...inputStyle(gramFocused), marginTop: 10 }}
+            />
+
+            {/* Media pickers */}
+            <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
+              <Pressable
+                onPress={pickImage}
+                style={({ pressed }) => ({
+                  flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+                  paddingVertical: 10, borderRadius: 10,
+                  borderWidth: 1, borderColor: imageUri ? c.accent : c.border,
+                  backgroundColor: imageUri ? c.accent + '12' : 'transparent',
+                  opacity: pressed ? 0.7 : 1,
+                })}
+              >
+                <ImageIcon size={16} color={imageUri ? c.accent : c.textMuted} />
+                <Text style={{
+                  fontFamily: 'Geist-Medium', fontSize: 13,
+                  color: imageUri ? c.accent : c.textMuted,
+                }}>
+                  {imageUri ? 'Image ✓' : 'Add Image'}
+                </Text>
+              </Pressable>
+
+              <Pressable
+                onPress={pickAudio}
+                style={({ pressed }) => ({
+                  flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+                  paddingVertical: 10, borderRadius: 10,
+                  borderWidth: 1, borderColor: audioUri ? c.accent : c.border,
+                  backgroundColor: audioUri ? c.accent + '12' : 'transparent',
+                  opacity: pressed ? 0.7 : 1,
+                })}
+              >
+                <Music size={16} color={audioUri ? c.accent : c.textMuted} />
+                <Text style={{
+                  fontFamily: 'Geist-Medium', fontSize: 13,
+                  color: audioUri ? c.accent : c.textMuted,
+                }}>
+                  {audioUri ? (audioName || 'Audio ✓') : 'Add Audio'}
+                </Text>
+              </Pressable>
+            </View>
+
+            {/* Image preview */}
+            {imageUri && (
+              <View style={{ marginTop: 10, position: 'relative' }}>
+                <RNImage
+                  source={{ uri: imageUri }}
+                  style={{ width: '100%', height: 140, borderRadius: 10 }}
+                  resizeMode="cover"
+                />
+                <Pressable
+                  onPress={() => setImageUri(null)}
+                  style={{
+                    position: 'absolute', top: 6, right: 6,
+                    backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 12,
+                    padding: 4,
+                  }}
+                >
+                  <X size={14} color="#fff" />
+                </Pressable>
+              </View>
+            )}
 
             <Pressable
               onPress={handleAddCard}
@@ -306,7 +446,7 @@ export default function CardEditorScreen() {
                 <>
                   <Plus size={16} color={c.accentText} />
                   <Text style={{ fontFamily: 'Geist-Medium', fontSize: 14, color: c.accentText }}>
-                    Add Card
+                    {uploading ? 'Uploading media...' : 'Add Card'}
                   </Text>
                 </>
               )}
@@ -344,6 +484,27 @@ export default function CardEditorScreen() {
                           {card.translation}
                         </Text>
                       ) : null}
+                      {(card.image_url || card.audio_url || card.grammar_tag) && (
+                        <View style={{ flexDirection: 'row', gap: 6, marginTop: 4 }}>
+                          {card.image_url && (
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+                              <ImageIcon size={10} color={c.textMuted} />
+                              <Text style={{ fontFamily: 'Geist-Regular', fontSize: 11, color: c.textMuted }}>img</Text>
+                            </View>
+                          )}
+                          {card.audio_url && (
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+                              <Music size={10} color={c.textMuted} />
+                              <Text style={{ fontFamily: 'Geist-Regular', fontSize: 11, color: c.textMuted }}>audio</Text>
+                            </View>
+                          )}
+                          {card.grammar_tag && (
+                            <Text style={{ fontFamily: 'Geist-Regular', fontSize: 11, color: c.textMuted, fontStyle: 'italic' }}>
+                              {card.grammar_tag}
+                            </Text>
+                          )}
+                        </View>
+                      )}
                     </View>
                     <Pressable
                       onPress={() => handleDeleteCard(card.id)}

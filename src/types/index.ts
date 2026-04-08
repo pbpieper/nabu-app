@@ -2,7 +2,7 @@ export interface Profile {
   id: string
   display_name: string | null
   email: string | null
-  role: 'student' | 'admin'
+  role: 'student' | 'teacher' | 'admin'
   created_at: string
 }
 
