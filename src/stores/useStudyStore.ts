@@ -3,6 +3,7 @@ import type { Card, CardProgress, SessionStats } from '@src/types'
 import { processReview, createNewProgress, buildStudyQueue } from '@src/lib/srs'
 import { supabase } from '@src/services/supabase/client'
 import { useDecksStore } from './useDecksStore'
+import { useLocalDeckStore } from './useLocalDeckStore'
 
 interface StartOpts { includeAll?: boolean; newLimit?: number }
 
@@ -47,17 +48,32 @@ export const useStudyStore = create<StudyState>((set, get) => ({
   newRemaining: 0,
 
   loadAndStart: async (deckId, userId, opts) => {
-    const [cardsRes, progressRes] = await Promise.all([
-      supabase.from('cards').select('*').eq('deck_id', deckId).order('sort_order', { ascending: true }),
-      supabase.from('card_progress').select('*').eq('user_id', userId).eq('deck_id', deckId),
-    ])
+    // ── Local-first: read from local deck store ──
+    const localStore = useLocalDeckStore.getState()
+    const localDeck = localStore.getLocalDeck(deckId)
 
-    const cards = (cardsRes.data ?? []) as Card[]
-    useDecksStore.setState({ currentCards: cards })
+    let cards: Card[]
+    let progressMap: Map<string, CardProgress>
 
-    const progressMap = new Map<string, CardProgress>()
-    for (const row of progressRes.data ?? []) {
-      progressMap.set(row.card_id, row as CardProgress)
+    if (localDeck) {
+      // Read entirely from local storage — instant, no network
+      cards = localDeck.cards
+      progressMap = localStore.getLocalProgress(deckId)
+      useDecksStore.setState({ currentCards: cards })
+    } else {
+      // Fallback: fetch from Supabase (for decks not yet downloaded)
+      const [cardsRes, progressRes] = await Promise.all([
+        supabase.from('cards').select('*').eq('deck_id', deckId).order('sort_order', { ascending: true }),
+        supabase.from('card_progress').select('*').eq('user_id', userId).eq('deck_id', deckId),
+      ])
+
+      cards = (cardsRes.data ?? []) as Card[]
+      useDecksStore.setState({ currentCards: cards })
+
+      progressMap = new Map<string, CardProgress>()
+      for (const row of progressRes.data ?? []) {
+        progressMap.set(row.card_id, row as CardProgress)
+      }
     }
 
     const queue = buildStudyQueue(
@@ -82,18 +98,28 @@ export const useStudyStore = create<StudyState>((set, get) => ({
   },
 
   startSession: async (cards, userId, deckId, opts) => {
-    const progressMap = new Map<string, CardProgress>()
-    try {
-      const { data } = await supabase
-        .from('card_progress')
-        .select('*')
-        .eq('user_id', userId)
-        .eq('deck_id', deckId)
-      for (const row of data ?? []) {
-        progressMap.set(row.card_id, row)
+    // Use local progress if available
+    const localStore = useLocalDeckStore.getState()
+    const localDeck = localStore.getLocalDeck(deckId)
+
+    let progressMap: Map<string, CardProgress>
+
+    if (localDeck) {
+      progressMap = localStore.getLocalProgress(deckId)
+    } else {
+      progressMap = new Map<string, CardProgress>()
+      try {
+        const { data } = await supabase
+          .from('card_progress')
+          .select('*')
+          .eq('user_id', userId)
+          .eq('deck_id', deckId)
+        for (const row of data ?? []) {
+          progressMap.set(row.card_id, row)
+        }
+      } catch {
+        // offline — start fresh
       }
-    } catch {
-      // offline — start fresh
     }
 
     const queue = buildStudyQueue(
@@ -162,6 +188,10 @@ export const useStudyStore = create<StudyState>((set, get) => ({
       }
     })
 
+    // ── Save progress locally (instant, persistent) ──
+    useLocalDeckStore.getState().saveProgress(deckId, cardId, updated)
+
+    // ── Background sync to Supabase (non-blocking, best-effort) ──
     supabase.from('card_progress').upsert({
       user_id: updated.user_id,
       card_id: updated.card_id,
@@ -177,7 +207,7 @@ export const useStudyStore = create<StudyState>((set, get) => ({
       last_hints_used: updated.last_hints_used,
     }, { onConflict: 'user_id,card_id' }).then(() => {}, () => {})
 
-    // Log review event
+    // Log review event (background)
     supabase.from('review_events').insert({
       user_id: userId,
       card_id: cardId,
@@ -194,10 +224,13 @@ export const useStudyStore = create<StudyState>((set, get) => ({
 
     const last = answerHistory[answerHistory.length - 1]
     const newMap = new Map(progressMap)
+    const deckId = useDecksStore.getState().currentDeck?.id ?? ''
 
     // Restore previous progress (or remove if card was new)
     if (last.prevProgress) {
       newMap.set(last.cardId, last.prevProgress)
+      // Restore locally
+      useLocalDeckStore.getState().saveProgress(deckId, last.cardId, last.prevProgress)
     } else {
       newMap.delete(last.cardId)
     }
@@ -211,7 +244,7 @@ export const useStudyStore = create<StudyState>((set, get) => ({
       }
     }
 
-    // Revert progress in Supabase
+    // Revert progress in Supabase (background)
     if (last.prevProgress) {
       supabase.from('card_progress').upsert({
         user_id: last.prevProgress.user_id,
@@ -248,6 +281,13 @@ export const useStudyStore = create<StudyState>((set, get) => ({
   },
 
   endSession: () => {
+    // Sync all progress to server on session end
+    const deckId = useDecksStore.getState().currentDeck?.id
+    const userId = get().progressMap.values().next()?.value?.user_id
+    if (deckId && userId) {
+      useLocalDeckStore.getState().syncProgressToServer(deckId, userId)
+    }
+
     set({
       sessionActive: false,
       queue: [],
