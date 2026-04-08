@@ -60,7 +60,8 @@ export default function StudySession() {
   const dark = resolvedTheme === 'dark'
   const {
     queue, currentIndex, sessionActive,
-    loadAndStart, startSession, answerCard, nextCard, endSession, sessionStats,
+    loadAndStart, startSession, answerCard, undoLastAnswer, nextCard, endSession,
+    sessionStats, answerHistory, wrongCount, newRemaining,
   } = useStudyStore()
 
   const c = useThemeColors()
@@ -111,6 +112,26 @@ export default function StudySession() {
       playAudio(card.audio_url).catch(() => {})
     }
   }, [revealedCount, layers, card, playAudio])
+
+  const revealAll = useCallback(() => {
+    layers.forEach((layer, idx) => {
+      if (idx >= revealedCount) {
+        Animated.timing(layer.opacity, {
+          toValue: 1, duration: 200, useNativeDriver: true,
+        }).start()
+      }
+    })
+    setRevealedCount(layers.length)
+    if (card?.audio_url && revealedCount === 0) {
+      playAudio(card.audio_url).catch(() => {})
+    }
+  }, [layers, revealedCount, card, playAudio])
+
+  const handleUndo = useCallback(() => {
+    if (userId && answerHistory.length > 0) {
+      undoLastAnswer(userId)
+    }
+  }, [userId, answerHistory, undoLastAnswer])
 
   // ---------------------------------------------------------------------------
   // Answer handlers
@@ -465,10 +486,29 @@ export default function StudySession() {
         <Pressable onPress={handleClose} style={{ padding: 8 }}>
           <X size={20} color={c.textSecondary} />
         </Pressable>
-        <Text style={{ fontFamily: 'Geist-Medium', fontSize: 14, color: c.textSecondary }}>
-          {currentIndex + 1} / {queue.length}
-        </Text>
-        <View style={{ width: 36 }} />
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+          <Text style={{ fontFamily: 'Geist-Medium', fontSize: 13, color: c.success }}>
+            ✓ {sessionStats.cardsCorrect}
+          </Text>
+          <Text style={{ fontFamily: 'Geist-Medium', fontSize: 13, color: c.error }}>
+            ✗ {wrongCount}
+          </Text>
+          <Text style={{ fontFamily: 'Geist-Medium', fontSize: 13, color: c.textMuted }}>
+            {currentIndex + 1}/{queue.length}
+          </Text>
+          {newRemaining > 0 && (
+            <Text style={{ fontFamily: 'Geist-Regular', fontSize: 12, color: c.accent }}>
+              {newRemaining} new
+            </Text>
+          )}
+        </View>
+        {answerHistory.length > 0 ? (
+          <Pressable onPress={handleUndo} style={{ padding: 8 }}>
+            <RotateCcw size={16} color={c.textSecondary} />
+          </Pressable>
+        ) : (
+          <View style={{ width: 36 }} />
+        )}
       </View>
 
       {/* Progress bar */}
@@ -585,33 +625,72 @@ export default function StudySession() {
         </Pressable>
       </View>
 
-      {/* Grading buttons — only after translation is revealed */}
-      {translationRevealed && (
-        <View style={{ flexDirection: 'row', gap: 12, paddingHorizontal: 24, paddingBottom: 24 }}>
-          <Pressable
-            onPress={() => handleAnswer(false)}
-            style={({ pressed }) => ({
-              flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-              gap: 8, paddingVertical: 14, borderRadius: 12, borderWidth: 1, borderColor: c.border,
-              opacity: pressed ? 0.7 : 1,
-            })}
-          >
-            <RotateCcw size={16} color={c.error} />
-            <Text style={{ fontFamily: 'Geist-Medium', fontSize: 15, color: c.error }}>Again</Text>
-          </Pressable>
-          <Pressable
-            onPress={() => handleAnswer(true)}
-            style={({ pressed }) => ({
-              flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-              gap: 8, paddingVertical: 14, borderRadius: 12, borderWidth: 1, borderColor: c.border,
-              opacity: pressed ? 0.7 : 1,
-            })}
-          >
-            <Check size={16} color={c.success} />
-            <Text style={{ fontFamily: 'Geist-Medium', fontSize: 15, color: c.success }}>Got it</Text>
-          </Pressable>
-        </View>
-      )}
+      {/* Bottom buttons — always visible during active card */}
+      <View style={{ paddingHorizontal: 24, paddingBottom: 24, gap: 10 }}>
+        {translationRevealed ? (
+          /* Grading row: Again — Reveal All (disabled) — Got it */
+          <View style={{ flexDirection: 'row', gap: 10 }}>
+            <Pressable
+              onPress={() => handleAnswer(false)}
+              style={({ pressed }) => ({
+                flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+                gap: 6, paddingVertical: 14, borderRadius: 12, borderWidth: 1, borderColor: c.border,
+                opacity: pressed ? 0.7 : 1,
+              })}
+            >
+              <RotateCcw size={16} color={c.error} />
+              <Text style={{ fontFamily: 'Geist-Medium', fontSize: 15, color: c.error }}>Again</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => handleAnswer(true)}
+              style={({ pressed }) => ({
+                flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+                gap: 6, paddingVertical: 14, borderRadius: 12,
+                backgroundColor: c.accent,
+                opacity: pressed ? 0.85 : 1,
+              })}
+            >
+              <Check size={16} color={c.accentText} />
+              <Text style={{ fontFamily: 'Geist-Medium', fontSize: 15, color: c.accentText }}>Got it</Text>
+            </Pressable>
+          </View>
+        ) : (
+          /* Pre-reveal row: Again — Reveal All — Got it */
+          <View style={{ flexDirection: 'row', gap: 10 }}>
+            <Pressable
+              onPress={() => { revealAll(); setTimeout(() => handleAnswer(false), 100) }}
+              style={({ pressed }) => ({
+                flex: 1, alignItems: 'center', justifyContent: 'center',
+                paddingVertical: 14, borderRadius: 12, borderWidth: 1, borderColor: c.border,
+                opacity: pressed ? 0.7 : 1,
+              })}
+            >
+              <Text style={{ fontFamily: 'Geist-Medium', fontSize: 15, color: c.error }}>✗</Text>
+            </Pressable>
+            <Pressable
+              onPress={revealAll}
+              style={({ pressed }) => ({
+                flex: 2, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+                gap: 6, paddingVertical: 14, borderRadius: 12,
+                backgroundColor: c.surface, borderWidth: 1, borderColor: c.border,
+                opacity: pressed ? 0.85 : 1,
+              })}
+            >
+              <Text style={{ fontFamily: 'Geist-Medium', fontSize: 15, color: c.text }}>Reveal All</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => { revealAll(); setTimeout(() => handleAnswer(true), 100) }}
+              style={({ pressed }) => ({
+                flex: 1, alignItems: 'center', justifyContent: 'center',
+                paddingVertical: 14, borderRadius: 12, borderWidth: 1, borderColor: c.border,
+                opacity: pressed ? 0.7 : 1,
+              })}
+            >
+              <Text style={{ fontFamily: 'Geist-Medium', fontSize: 15, color: c.success }}>✓</Text>
+            </Pressable>
+          </View>
+        )}
+      </View>
 
       {/* Keyboard hint bar (web only) */}
       {Platform.OS === 'web' && !keyHintDismissed && (

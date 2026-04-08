@@ -6,6 +6,12 @@ import { useDecksStore } from './useDecksStore'
 
 interface StartOpts { includeAll?: boolean; newLimit?: number }
 
+interface AnswerHistoryEntry {
+  cardId: string
+  correct: boolean
+  prevProgress: CardProgress | null
+}
+
 interface StudyState {
   queue: string[]
   currentIndex: number
@@ -13,9 +19,13 @@ interface StudyState {
   sessionStats: SessionStats
   sessionActive: boolean
   practiceAll: boolean
+  answerHistory: AnswerHistoryEntry[]
+  wrongCount: number
+  newRemaining: number
   loadAndStart: (deckId: string, userId: string, opts?: StartOpts) => Promise<void>
   startSession: (cards: Card[], userId: string, deckId: string, opts?: StartOpts) => Promise<void>
   answerCard: (cardId: string, correct: boolean, userId: string) => void
+  undoLastAnswer: (userId: string) => void
   nextCard: () => void
   endSession: () => void
   setPracticeAll: (value: boolean) => void
@@ -30,6 +40,9 @@ export const useStudyStore = create<StudyState>((set, get) => ({
   sessionStats: { ...emptyStats },
   sessionActive: false,
   practiceAll: false,
+  answerHistory: [],
+  wrongCount: 0,
+  newRemaining: 0,
 
   loadAndStart: async (deckId, userId, opts) => {
     const [cardsRes, progressRes] = await Promise.all([
@@ -51,6 +64,8 @@ export const useStudyStore = create<StudyState>((set, get) => ({
       opts?.includeAll ?? false,
     )
 
+    const newRemaining = cards.filter(c => !progressMap.has(c.id)).length
+
     set({
       queue,
       currentIndex: 0,
@@ -58,6 +73,9 @@ export const useStudyStore = create<StudyState>((set, get) => ({
       sessionActive: true,
       practiceAll: opts?.includeAll ?? false,
       sessionStats: { ...emptyStats },
+      answerHistory: [],
+      wrongCount: 0,
+      newRemaining: Math.min(newRemaining, opts?.newLimit ?? 20),
     })
   },
 
@@ -82,6 +100,8 @@ export const useStudyStore = create<StudyState>((set, get) => ({
       opts?.includeAll ?? false,
     )
 
+    const newRemaining2 = cards.filter(c => !progressMap.has(c.id)).length
+
     set({
       queue,
       currentIndex: 0,
@@ -89,20 +109,26 @@ export const useStudyStore = create<StudyState>((set, get) => ({
       sessionActive: true,
       practiceAll: opts?.includeAll ?? false,
       sessionStats: { ...emptyStats },
+      answerHistory: [],
+      wrongCount: 0,
+      newRemaining: Math.min(newRemaining2, opts?.newLimit ?? 20),
     })
   },
 
   answerCard: (cardId, correct, userId) => {
-    const { progressMap } = get()
-    const existing = progressMap.get(cardId)
-    const progress = existing ?? createNewProgress(userId, cardId, '')
+    const { progressMap, answerHistory } = get()
+    const existing = progressMap.get(cardId) ?? null
+    const deckId = useDecksStore.getState().currentDeck?.id ?? ''
+    const progress = existing ?? createNewProgress(userId, cardId, deckId)
     const updated = processReview(progress, correct)
 
     const newMap = new Map(progressMap)
     newMap.set(cardId, updated)
 
+    // Save to undo history
+    const newHistory = [...answerHistory, { cardId, correct, prevProgress: existing }]
+
     set(state => {
-      // Re-add wrong answers to the end of the queue so they come back this session
       const updatedQueue = !correct
         ? [...state.queue, cardId]
         : state.queue
@@ -110,6 +136,9 @@ export const useStudyStore = create<StudyState>((set, get) => ({
       return {
         queue: updatedQueue,
         progressMap: newMap,
+        answerHistory: newHistory,
+        wrongCount: state.wrongCount + (correct ? 0 : 1),
+        newRemaining: state.newRemaining - (!existing && correct ? 1 : 0),
         sessionStats: {
           ...state.sessionStats,
           cardsReviewed: state.sessionStats.cardsReviewed + 1,
@@ -133,6 +162,61 @@ export const useStudyStore = create<StudyState>((set, get) => ({
     }, { onConflict: 'user_id,card_id' }).then(() => {}, () => {})
   },
 
+  undoLastAnswer: (userId: string) => {
+    const { answerHistory, progressMap, queue, currentIndex } = get()
+    if (answerHistory.length === 0 || currentIndex === 0) return
+
+    const last = answerHistory[answerHistory.length - 1]
+    const newMap = new Map(progressMap)
+
+    // Restore previous progress (or remove if card was new)
+    if (last.prevProgress) {
+      newMap.set(last.cardId, last.prevProgress)
+    } else {
+      newMap.delete(last.cardId)
+    }
+
+    // If wrong answer added card to end of queue, remove that addition
+    let newQueue = [...queue]
+    if (!last.correct) {
+      const lastIdx = newQueue.lastIndexOf(last.cardId)
+      if (lastIdx > currentIndex - 1) {
+        newQueue.splice(lastIdx, 1)
+      }
+    }
+
+    // Revert progress in Supabase
+    if (last.prevProgress) {
+      supabase.from('card_progress').upsert({
+        user_id: last.prevProgress.user_id,
+        card_id: last.prevProgress.card_id,
+        deck_id: last.prevProgress.deck_id,
+        interval_days: last.prevProgress.interval_days,
+        next_review_at: last.prevProgress.next_review_at,
+        consecutive_correct: last.prevProgress.consecutive_correct,
+        total_reviews: last.prevProgress.total_reviews,
+        total_correct: last.prevProgress.total_correct,
+        status: last.prevProgress.status,
+        last_reviewed_at: last.prevProgress.last_reviewed_at,
+      }, { onConflict: 'user_id,card_id' }).then(() => {}, () => {})
+    }
+
+    set(state => ({
+      queue: newQueue,
+      currentIndex: state.currentIndex - 1,
+      progressMap: newMap,
+      answerHistory: answerHistory.slice(0, -1),
+      wrongCount: state.wrongCount - (last.correct ? 0 : 1),
+      newRemaining: state.newRemaining + (!last.prevProgress && last.correct ? 1 : 0),
+      sessionStats: {
+        ...state.sessionStats,
+        cardsReviewed: Math.max(0, state.sessionStats.cardsReviewed - 1),
+        cardsCorrect: state.sessionStats.cardsCorrect - (last.correct ? 1 : 0),
+        newCardsSeen: state.sessionStats.newCardsSeen - (!last.prevProgress ? 1 : 0),
+      },
+    }))
+  },
+
   nextCard: () => {
     set(state => ({ currentIndex: Math.min(state.currentIndex + 1, state.queue.length) }))
   },
@@ -144,6 +228,9 @@ export const useStudyStore = create<StudyState>((set, get) => ({
       currentIndex: 0,
       practiceAll: false,
       sessionStats: { ...emptyStats },
+      answerHistory: [],
+      wrongCount: 0,
+      newRemaining: 0,
     })
   },
 
