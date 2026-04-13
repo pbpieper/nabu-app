@@ -11,9 +11,11 @@ import { useStudyPreferencesStore } from '@src/stores/useStudyPreferencesStore'
 import { useThemeColors } from '@src/hooks/useThemeColors'
 import { useThemeStore } from '@src/stores/useThemeStore'
 import { useAudio } from '@src/hooks/useAudio'
-import { isRTL, type Card, type SessionStats } from '@src/types'
+import { BoldText } from '@src/lib/renderBoldText'
+import { processReview, createNewProgress, buildStudyQueue } from '@src/lib/srs'
+import { isRTL, type Card, type CardProgress, type SessionStats } from '@src/types'
 import {
-  X, CheckCircle, RotateCcw, Check, Clock, RefreshCw, Volume2,
+  X, CheckCircle, RotateCcw, Check, Clock, RefreshCw, Volume2, LogIn,
 } from 'lucide-react-native'
 
 // ---------------------------------------------------------------------------
@@ -29,8 +31,29 @@ interface RevealLayerEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Guest mode props — when provided, component runs in guest mode
+// ---------------------------------------------------------------------------
+
+export interface GuestStudyProps {
+  mode: 'guest'
+  deckCode: string
+  deck: { id: string; title: string; source_language: string; target_language: string }
+  cards: Card[]
+  initialProgress: Map<string, CardProgress>
+  onSaveProgress: (cardId: string, progress: CardProgress) => void
+}
+
+export interface AuthedStudyProps {
+  mode?: 'authed' | undefined
+}
+
+export type StudySessionProps = GuestStudyProps | AuthedStudyProps
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+const GUEST_USER_ID = 'guest'
 
 /** Build the ordered list of layers that have content for a given card. */
 function buildLayers(card: Card): RevealLayerEntry[] {
@@ -45,43 +68,114 @@ function buildLayers(card: Card): RevealLayerEntry[] {
 }
 
 // ---------------------------------------------------------------------------
+// Undo history entry (used by both guest and authed modes internally)
+// ---------------------------------------------------------------------------
+
+interface UndoEntry {
+  cardId: string
+  correct: boolean
+  prevProgress: CardProgress | null
+}
+
+// ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
 
-export default function StudySession() {
+export default function StudySession(props: StudySessionProps = { mode: 'authed' }) {
+  const isGuest = props.mode === 'guest'
+
   const router = useRouter()
   const navigation = useNavigation()
+  const c = useThemeColors()
+  const resolvedTheme = useThemeStore(s => s.resolvedTheme)
+  const dark = resolvedTheme === 'dark'
+  const { play: playAudio, stop: stopAudio } = useAudio()
+
+  // ── Auth-mode stores (only used when not guest) ──
   const session = useAuthStore(s => s.session)
   const profile = useAuthStore(s => s.profile)
   const currentDeck = useDecksStore(s => s.currentDeck)
   const currentCards = useDecksStore(s => s.currentCards)
   const newCardsPerSession = useStudyPreferencesStore(s => s.newCardsPerSession)
-  const resolvedTheme = useThemeStore(s => s.resolvedTheme)
-  const dark = resolvedTheme === 'dark'
   const {
-    queue, currentIndex, sessionActive,
-    loadAndStart, startSession, answerCard, undoLastAnswer, nextCard, endSession,
-    sessionStats, answerHistory, wrongCount, newRemaining,
+    queue: authedQueue, currentIndex: authedCurrentIndex, sessionActive,
+    loadAndStart, startSession, answerCard: authedAnswerCard,
+    undoLastAnswer: authedUndoLastAnswer, nextCard: authedNextCard, endSession,
+    sessionStats: authedSessionStats, answerHistory: authedAnswerHistory,
+    wrongCount: authedWrongCount, newRemaining,
   } = useStudyStore()
 
-  const c = useThemeColors()
-  const { play: playAudio, stop: stopAudio } = useAudio()
+  // ── Guest-mode local state ──
+  const [guestQueue, setGuestQueue] = useState<string[]>([])
+  const [guestIndex, setGuestIndex] = useState(0)
+  const [guestProgressMap, setGuestProgressMap] = useState<Map<string, CardProgress>>(new Map())
+  const [guestStats, setGuestStats] = useState<SessionStats>({
+    cardsReviewed: 0, cardsCorrect: 0, newCardsSeen: 0, durationMs: 0,
+  })
+  const [guestUndoHistory, setGuestUndoHistory] = useState<UndoEntry[]>([])
+  const [guestLoaded, setGuestLoaded] = useState(false)
 
-  // Progressive reveal state
+  // Progressive reveal state (shared by both modes)
   const [revealedCount, setRevealedCount] = useState(0)
   const [layers, setLayers] = useState<RevealLayerEntry[]>([])
   const [keyHintDismissed, setKeyHintDismissed] = useState(false)
   const cardStartTimeRef = useRef<number>(Date.now())
-
   const completedStatsRef = useRef<SessionStats | null>(null)
 
-  const userId = profile?.id ?? session?.user?.id
+  // ── Unified derived state ──
+  const userId = isGuest ? GUEST_USER_ID : (profile?.id ?? session?.user?.id)
 
-  // Derived state
+  const queue = isGuest ? guestQueue : authedQueue
+  const currentIndex = isGuest ? guestIndex : authedCurrentIndex
+  const cards = isGuest ? (props as GuestStudyProps).cards : currentCards
+  const deckTitle = isGuest ? (props as GuestStudyProps).deck.title : (currentDeck?.title ?? '')
+  const deckId = isGuest ? (props as GuestStudyProps).deck.id : (currentDeck?.id ?? '')
+  const targetLang = isGuest ? (props as GuestStudyProps).deck.target_language : (currentDeck?.target_language ?? 'en')
+
+  const stats = isGuest ? guestStats : authedSessionStats
+  const undoHistory = isGuest ? guestUndoHistory : authedAnswerHistory
+  const wrongCount = isGuest
+    ? guestStats.cardsReviewed - guestStats.cardsCorrect
+    : authedWrongCount
+
   const currentCardId = queue[currentIndex]
-  const card = currentCards.find(ci => ci.id === currentCardId)
+  const card = cards.find(ci => ci.id === currentCardId)
   const translationRevealed = revealedCount >= layers.length && layers.length > 0
-  const rtl = currentDeck ? isRTL(currentDeck.target_language) : false
+  const rtl = isRTL(targetLang)
+  const isComplete = currentIndex >= queue.length && queue.length > 0
+
+  // ── Guest session bootstrap ──
+  useEffect(() => {
+    if (!isGuest) return
+    const gProps = props as GuestStudyProps
+    setGuestProgressMap(new Map(gProps.initialProgress))
+
+    const q = buildStudyQueue(
+      gProps.cards.map(card => ({
+        card_id: card.id,
+        progress: gProps.initialProgress.get(card.id) ?? null,
+      })),
+      20,
+      false,
+    )
+    setGuestQueue(q)
+    setGuestLoaded(true)
+  }, [isGuest && (props as GuestStudyProps).deckCode])
+
+  // ── Authed session bootstrap ──
+  useEffect(() => {
+    if (isGuest) return
+    if (currentDeck && userId && !sessionActive) {
+      loadAndStart(currentDeck.id, userId, { newLimit: newCardsPerSession })
+    }
+  }, [isGuest, currentDeck?.id, userId])
+
+  // ── Capture stats on completion ──
+  useEffect(() => {
+    if (isComplete && stats.cardsReviewed > 0) {
+      completedStatsRef.current = { ...stats }
+    }
+  }, [isComplete])
 
   // Rebuild layers whenever card changes
   useEffect(() => {
@@ -129,23 +223,132 @@ export default function StudySession() {
     }
   }, [layers, revealedCount, card, playAudio])
 
-  const handleUndo = useCallback(() => {
-    if (userId && answerHistory.length > 0) {
-      undoLastAnswer(userId)
-    }
-  }, [userId, answerHistory, undoLastAnswer])
-
   // ---------------------------------------------------------------------------
   // Answer handlers
   // ---------------------------------------------------------------------------
 
   const handleAnswer = useCallback((correct: boolean) => {
     const timeMs = Date.now() - cardStartTimeRef.current
-    if (userId && card) answerCard(card.id, correct, userId, revealedCount, timeMs)
     stopAudio().catch(() => {})
-    nextCard()
-    // revealedCount and layers reset via the card?.id effect
-  }, [userId, card, answerCard, nextCard, stopAudio, revealedCount])
+
+    if (isGuest) {
+      if (!card) return
+      const gProps = props as GuestStudyProps
+      const existing = guestProgressMap.get(card.id) ?? null
+      const progress = existing ?? createNewProgress(GUEST_USER_ID, card.id, deckId)
+      const updated = processReview(progress, correct)
+
+      const newMap = new Map(guestProgressMap)
+      newMap.set(card.id, updated)
+      setGuestProgressMap(newMap)
+
+      // Persist to AsyncStorage via store
+      gProps.onSaveProgress(card.id, updated)
+
+      // Push undo entry
+      setGuestUndoHistory(prev => [...prev, { cardId: card.id, correct, prevProgress: existing }])
+
+      setGuestStats(prev => ({
+        ...prev,
+        cardsReviewed: prev.cardsReviewed + 1,
+        cardsCorrect: prev.cardsCorrect + (correct ? 1 : 0),
+        newCardsSeen: prev.newCardsSeen + (!existing ? 1 : 0),
+      }))
+
+      if (!correct) {
+        setGuestQueue(prev => [...prev, card.id])
+      }
+      setGuestIndex(prev => prev + 1)
+    } else {
+      if (userId && card) authedAnswerCard(card.id, correct, userId, revealedCount, timeMs)
+      authedNextCard()
+    }
+  }, [isGuest, userId, card, guestProgressMap, deckId, revealedCount, stopAudio,
+    authedAnswerCard, authedNextCard, props])
+
+  // ---------------------------------------------------------------------------
+  // Undo handler
+  // ---------------------------------------------------------------------------
+
+  const handleUndo = useCallback(() => {
+    if (isGuest) {
+      if (guestUndoHistory.length === 0 || guestIndex === 0) return
+      const last = guestUndoHistory[guestUndoHistory.length - 1]
+
+      const newMap = new Map(guestProgressMap)
+      if (last.prevProgress) {
+        newMap.set(last.cardId, last.prevProgress)
+        // Also persist the restored state
+        ;(props as GuestStudyProps).onSaveProgress(last.cardId, last.prevProgress)
+      } else {
+        newMap.delete(last.cardId)
+      }
+
+      let newQueue = [...guestQueue]
+      if (!last.correct) {
+        const lastIdx = newQueue.lastIndexOf(last.cardId)
+        if (lastIdx > guestIndex - 1) {
+          newQueue.splice(lastIdx, 1)
+        }
+      }
+
+      setGuestProgressMap(newMap)
+      setGuestQueue(newQueue)
+      setGuestIndex(prev => prev - 1)
+      setGuestUndoHistory(prev => prev.slice(0, -1))
+      setGuestStats(prev => ({
+        ...prev,
+        cardsReviewed: Math.max(0, prev.cardsReviewed - 1),
+        cardsCorrect: prev.cardsCorrect - (last.correct ? 1 : 0),
+        newCardsSeen: prev.newCardsSeen - (!last.prevProgress ? 1 : 0),
+      }))
+    } else {
+      if (userId && undoHistory.length > 0) {
+        authedUndoLastAnswer(userId)
+      }
+    }
+  }, [isGuest, userId, guestUndoHistory, guestProgressMap, guestQueue, guestIndex,
+    undoHistory, authedUndoLastAnswer, props])
+
+  // ---------------------------------------------------------------------------
+  // Restart handler
+  // ---------------------------------------------------------------------------
+
+  const handleRestart = useCallback(() => {
+    completedStatsRef.current = null
+
+    if (isGuest) {
+      const gProps = props as GuestStudyProps
+      const q = buildStudyQueue(
+        gProps.cards.map(c => ({
+          card_id: c.id,
+          progress: guestProgressMap.get(c.id) ?? null,
+        })),
+        20,
+        true,
+      )
+      setGuestQueue(q)
+      setGuestIndex(0)
+      setGuestStats({ cardsReviewed: 0, cardsCorrect: 0, newCardsSeen: 0, durationMs: 0 })
+      setGuestUndoHistory([])
+    } else {
+      if (userId && currentDeck) {
+        startSession(currentCards, userId, currentDeck.id, {
+          includeAll: true, newLimit: currentCards.length,
+        })
+      }
+    }
+  }, [isGuest, userId, currentDeck, currentCards, guestProgressMap, startSession, props])
+
+  // ---------------------------------------------------------------------------
+  // Close handler
+  // ---------------------------------------------------------------------------
+
+  const handleClose = useCallback(() => {
+    stopAudio().catch(() => {})
+    if (!isGuest) endSession()
+    router.back()
+  }, [isGuest, stopAudio, endSession, router])
 
   // ---------------------------------------------------------------------------
   // Keyboard shortcuts (web only)
@@ -154,7 +357,6 @@ export default function StudySession() {
   useEffect(() => {
     if (Platform.OS !== 'web') return
     const handler = (e: KeyboardEvent) => {
-      // Ignore if user is typing in an input
       const tag = (e.target as HTMLElement)?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA') return
 
@@ -182,10 +384,11 @@ export default function StudySession() {
   }, [translationRevealed, revealNext, handleAnswer])
 
   // ---------------------------------------------------------------------------
-  // Tab bar hiding
+  // Tab bar hiding (authed only — guest has no tab bar)
   // ---------------------------------------------------------------------------
 
   useFocusEffect(useCallback(() => {
+    if (isGuest) return
     const parent = navigation.getParent()
     parent?.setOptions({
       tabBarStyle: {
@@ -208,37 +411,14 @@ export default function StudySession() {
         },
       })
     }
-  }, [navigation, dark]))
-
-  // ---------------------------------------------------------------------------
-  // Session bootstrap
-  // ---------------------------------------------------------------------------
-
-  useEffect(() => {
-    if (currentDeck && userId && !sessionActive) {
-      loadAndStart(currentDeck.id, userId, { newLimit: newCardsPerSession })
-    }
-  }, [currentDeck?.id, userId])
-
-  const isComplete = currentIndex >= queue.length && queue.length > 0
-
-  useEffect(() => {
-    if (isComplete && sessionStats.cardsReviewed > 0) {
-      completedStatsRef.current = { ...sessionStats }
-    }
-  }, [isComplete])
-
-  const handleClose = () => {
-    stopAudio().catch(() => {})
-    endSession()
-    router.back()
-  }
+  }, [isGuest, navigation, dark]))
 
   // =========================================================================
-  // EARLY RETURN SCREENS (no deck, loading, all caught up, session complete)
+  // EARLY RETURN SCREENS
   // =========================================================================
 
-  if (!currentDeck) {
+  // Authed: No deck selected
+  if (!isGuest && !currentDeck) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }}>
         <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32 }}>
@@ -271,7 +451,8 @@ export default function StudySession() {
     )
   }
 
-  if (!sessionActive && (currentCards.length === 0 || queue.length === 0)) {
+  // Authed: Loading cards
+  if (!isGuest && !sessionActive && (currentCards.length === 0 || authedQueue.length === 0)) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }}>
         <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
@@ -286,8 +467,22 @@ export default function StudySession() {
     )
   }
 
-  // All caught up
-  if (sessionActive && queue.length === 0) {
+  // Guest: Still loading
+  if (isGuest && !guestLoaded) {
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: c.bg, justifyContent: 'center', alignItems: 'center' }}>
+        <ActivityIndicator size="large" color={c.textMuted} />
+        <Text style={{
+          fontFamily: 'Geist-Regular', fontSize: 14, color: c.textMuted, marginTop: 16,
+        }}>
+          Preparing session...
+        </Text>
+      </SafeAreaView>
+    )
+  }
+
+  // Authed: All caught up (no cards due)
+  if (!isGuest && sessionActive && authedQueue.length === 0) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }}>
         <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32 }}>
@@ -313,7 +508,7 @@ export default function StudySession() {
           <Text style={{
             fontFamily: 'Geist-Regular', fontSize: 13, color: c.textMuted, marginBottom: 28,
           }}>
-            {currentDeck.title}
+            {deckTitle}
           </Text>
           <View style={{ gap: 10, width: '100%', maxWidth: 300 }}>
             <Pressable
@@ -353,9 +548,13 @@ export default function StudySession() {
     )
   }
 
-  // Session complete
-  const displayStats = completedStatsRef.current ?? sessionStats
+  // ── Session complete ──
+  const displayStats = completedStatsRef.current ?? stats
   if (isComplete) {
+    const pct = displayStats.cardsReviewed > 0
+      ? Math.round((displayStats.cardsCorrect / displayStats.cardsReviewed) * 100)
+      : 0
+
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }}>
         <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32 }}>
@@ -375,7 +574,7 @@ export default function StudySession() {
           <Text style={{
             fontFamily: 'Geist-Regular', fontSize: 14, color: c.textMuted, marginBottom: 24,
           }}>
-            {currentDeck.title}
+            {deckTitle}
           </Text>
 
           <View style={{
@@ -384,7 +583,7 @@ export default function StudySession() {
           }}>
             {[
               { label: 'Reviewed', value: displayStats.cardsReviewed },
-              { label: 'Correct', value: displayStats.cardsCorrect },
+              { label: 'Correct', value: `${pct}%` },
               { label: 'New', value: displayStats.newCardsSeen },
             ].map(s => (
               <View key={s.label} style={{
@@ -406,16 +605,11 @@ export default function StudySession() {
             ))}
           </View>
 
+          {/* Action buttons */}
           <View style={{ gap: 10, width: '100%', maxWidth: 300 }}>
+            {/* Keep studying / Study Again */}
             <Pressable
-              onPress={() => {
-                completedStatsRef.current = null
-                if (userId && currentDeck) {
-                  startSession(currentCards, userId, currentDeck.id, {
-                    includeAll: true, newLimit: currentCards.length,
-                  })
-                }
-              }}
+              onPress={handleRestart}
               style={({ pressed }) => ({
                 flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
                 backgroundColor: c.accent, borderRadius: 10, paddingVertical: 14,
@@ -424,19 +618,42 @@ export default function StudySession() {
             >
               <RefreshCw size={16} color={c.accentText} />
               <Text style={{ fontFamily: 'Geist-Medium', fontSize: 15, color: c.accentText }}>
-                Study Again
+                {isGuest ? 'Keep Studying' : 'Study Again'}
               </Text>
             </Pressable>
+
+            {/* Guest: Sign in prompt */}
+            {isGuest && (
+              <Pressable
+                onPress={() => router.push('/(auth)/sign-in')}
+                style={({ pressed }) => ({
+                  flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+                  borderWidth: 1, borderColor: c.border, borderRadius: 10, paddingVertical: 14,
+                  opacity: pressed ? 0.7 : 1,
+                })}
+              >
+                <LogIn size={16} color={c.textSecondary} />
+                <Text style={{ fontFamily: 'Geist-Medium', fontSize: 15, color: c.textSecondary }}>
+                  Sign in to save your progress
+                </Text>
+              </Pressable>
+            )}
+
+            {/* Dismiss / Done */}
             <Pressable
               onPress={handleClose}
               style={({ pressed }) => ({
                 flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-                borderWidth: 1, borderColor: c.border, borderRadius: 10, paddingVertical: 14,
+                borderWidth: isGuest ? 0 : 1, borderColor: c.border, borderRadius: 10,
+                paddingVertical: isGuest ? 10 : 14,
                 opacity: pressed ? 0.7 : 1,
               })}
             >
-              <Text style={{ fontFamily: 'Geist-Regular', fontSize: 15, color: c.textSecondary }}>
-                Done
+              <Text style={{
+                fontFamily: 'Geist-Regular', fontSize: 15,
+                color: isGuest ? c.textMuted : c.textSecondary,
+              }}>
+                {isGuest ? 'Dismiss' : 'Done'}
               </Text>
             </Pressable>
           </View>
@@ -445,6 +662,7 @@ export default function StudySession() {
     )
   }
 
+  // No current card (loading interstitial)
   if (!card) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }}>
@@ -491,7 +709,7 @@ export default function StudySession() {
         </Pressable>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
           <Text style={{ fontFamily: 'Geist-Medium', fontSize: 13, color: c.success }}>
-            ✓ {sessionStats.cardsCorrect}
+            ✓ {stats.cardsCorrect}
           </Text>
           <Text style={{ fontFamily: 'Geist-Medium', fontSize: 13, color: c.error }}>
             ✗ {wrongCount}
@@ -499,13 +717,13 @@ export default function StudySession() {
           <Text style={{ fontFamily: 'Geist-Medium', fontSize: 13, color: c.textMuted }}>
             {currentIndex + 1}/{queue.length}
           </Text>
-          {newRemaining > 0 && (
+          {!isGuest && newRemaining > 0 && (
             <Text style={{ fontFamily: 'Geist-Regular', fontSize: 12, color: c.accent }}>
               {newRemaining} new
             </Text>
           )}
         </View>
-        {answerHistory.length > 0 ? (
+        {undoHistory.length > 0 ? (
           <Pressable onPress={handleUndo} style={{ padding: 8 }}>
             <RotateCcw size={16} color={c.textSecondary} />
           </Pressable>
@@ -564,12 +782,14 @@ export default function StudySession() {
               opacity: getLayerOpacity('example_sentence')!,
               backgroundColor: c.surface, borderRadius: 8, padding: 12, marginTop: 16, width: '100%',
             }}>
-              <Text style={{
-                fontFamily: 'Geist-Regular', fontSize: 14, color: c.textSecondary,
-                textAlign: 'center', lineHeight: 20, writingDirection: rtl ? 'rtl' : 'ltr',
-              }}>
-                {card.example_sentence}
-              </Text>
+              <BoldText
+                text={card.example_sentence ?? ''}
+                style={{
+                  fontFamily: 'Geist-Regular', fontSize: 14, color: c.textSecondary,
+                  textAlign: 'center', lineHeight: 20, writingDirection: rtl ? 'rtl' : 'ltr',
+                }}
+                boldStyle={{ color: c.text }}
+              />
             </Animated.View>
           )}
 
@@ -639,7 +859,7 @@ export default function StudySession() {
       {/* Bottom buttons — always visible during active card */}
       <View style={{ paddingHorizontal: 24, paddingBottom: 24, gap: 10 }}>
         {translationRevealed ? (
-          /* Grading row: Again — Reveal All (disabled) — Got it */
+          /* Grading row: Again — Got it */
           <View style={{ flexDirection: 'row', gap: 10 }}>
             <Pressable
               onPress={() => handleAnswer(false)}
