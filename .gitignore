@@ -42,3 +42,6 @@ yarn-error.*
 .vercel
 .env
 .env
+
+# Generated deck output
+/generated/
