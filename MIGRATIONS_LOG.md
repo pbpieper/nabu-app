@@ -52,6 +52,12 @@
 - **applied_to_prod_at:** TBD
 - **Notes:** Adds three tables (articles, unique_terms, article_sorts) + `lexa_upsert_terms` RPC. RLS scoped to auth.uid(). Implements Lexa write-up §11.3 (flat term DB is the spine) and §12 (first-seen-sentence). Purely additive — no existing tables touched.
 
+### 008_pin_lexa_upsert_search_path.sql
+- **Status:** applied
+- **Applied at:** 2026-05-11
+- **applied_to_prod_at:** TBD
+- **Notes:** Pins `search_path = pg_catalog, public` on `lexa_upsert_terms` per security advisor. SECURITY INVOKER preserved. No data change.
+
 ---
 
 ## Verification Query Results

@@ -174,8 +174,11 @@ export async function hashText(text: string): Promise<string> {
   // import wrapped in try/catch so this module also runs cleanly under tsx /
   // Node where expo-crypto isn't installed.
   try {
+    // expo-crypto is RN-only; we dynamic-import + catch so the module also
+    // runs under tsx/Node. Suppress TS module resolution since it's optional.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const mod: any = await import(
+      // @ts-expect-error optional RN-only dependency, resolved at runtime
       /* @vite-ignore */ /* webpackIgnore: true */ 'expo-crypto'
     ).catch(() => null)
     if (mod && mod.digestStringAsync && mod.CryptoDigestAlgorithm) {
