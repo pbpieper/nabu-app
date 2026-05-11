@@ -46,6 +46,12 @@
 - **applied_to_prod_at:** TBD
 - **Notes:** Creates deck_subscriptions table for cross-device "My Decks" persistence. Users manage own subscriptions via RLS.
 
+### 007_lexa_unique_terms.sql
+- **Status:** applied
+- **Applied at:** 2026-05-11 (Lexa swipe-sort session)
+- **applied_to_prod_at:** TBD
+- **Notes:** Adds three tables (articles, unique_terms, article_sorts) + `lexa_upsert_terms` RPC. RLS scoped to auth.uid(). Implements Lexa write-up §11.3 (flat term DB is the spine) and §12 (first-seen-sentence). Purely additive — no existing tables touched.
+
 ---
 
 ## Verification Query Results
