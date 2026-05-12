@@ -42,3 +42,6 @@ yarn-error.*
 .vercel
 .env
 .env
+
+# generate-deck script output (G-I.1: no script artifacts in git)
+/generated/
